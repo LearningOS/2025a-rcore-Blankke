@@ -51,10 +51,9 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
-            task_cx: TaskContext::zero_init(),
-            task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+        let mut tasks: [TaskControlBlock; MAX_APP_NUM] = core::array::from_fn(|_| {
+            TaskControlBlock::new(TaskContext::zero_init(), TaskStatus::UnInit)
+        });
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -72,6 +71,25 @@ lazy_static! {
 }
 
 impl TaskManager {
+    /// Increment syscall count for current task
+    pub fn increment_current_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].increment_syscall_count(syscall_id);
+    }
+
+    /// Get syscall count for current task
+    pub fn get_current_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].get_syscall_count(syscall_id)
+    }
+
+    /// Get current task id
+    pub fn get_current_task_id(&self) -> usize {
+        self.inner.exclusive_access().current_task
+    }
+
     /// Run the first task in task list.
     ///
     /// Generally, the first task in task list is an idle task (we call it zero process later).
@@ -168,4 +186,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Increment syscall count for current task
+pub fn increment_current_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.increment_current_syscall_count(syscall_id);
+}
+
+/// Get syscall count for current task
+pub fn get_current_syscall_count(syscall_id: usize) -> usize {
+    TASK_MANAGER.get_current_syscall_count(syscall_id)
 }
