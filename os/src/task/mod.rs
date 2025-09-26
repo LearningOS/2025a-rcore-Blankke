@@ -133,6 +133,86 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Increment syscall count for current task
+    pub fn increment_current_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].increment_syscall_count(syscall_id);
+    }
+
+    /// Get syscall count for current task
+    pub fn get_current_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].get_syscall_count(syscall_id)
+    }
+
+    /// Perform mmap operation on current task
+    pub fn current_mmap(&self, start: usize, len: usize, prot: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].mmap(start, len, prot)
+    }
+
+    /// Perform munmap operation on current task
+    pub fn current_munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].munmap(start, len)
+    }
+
+    /// Get mutable reference to current task's memory set for mmap/munmap
+    pub fn with_current_memory_set<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut crate::mm::MemorySet) -> R,
+    {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        f(&mut inner.tasks[cur].memory_set)
+    }
+
+    /// Translate a user pointer to a mutable reference, return None if invalid
+    pub fn translate_user_ptr<T>(&self, ptr: *mut T) -> Option<&'static mut T> {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &inner.tasks[cur].memory_set;
+        let va = crate::mm::VirtAddr::from(ptr as usize);
+        let vpn = va.floor();
+        if let Some(pte) = memory_set.translate(vpn) {
+            if pte.is_valid() && pte.writable() {
+                let ppn = pte.ppn();
+                let offset = va.page_offset();
+                let pa = crate::mm::PhysAddr::from(ppn.0 * crate::config::PAGE_SIZE + offset);
+                Some(unsafe { (pa.0 as *mut T).as_mut().unwrap() })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Translate a user pointer to a reference, return None if invalid  
+    pub fn translate_user_ptr_readonly<T>(&self, ptr: *const T) -> Option<&'static T> {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &inner.tasks[cur].memory_set;
+        let va = crate::mm::VirtAddr::from(ptr as usize);
+        let vpn = va.floor();
+        if let Some(pte) = memory_set.translate(vpn) {
+            if pte.is_valid() && pte.readable() {
+                let ppn = pte.ppn();
+                let offset = va.page_offset();
+                let pa = crate::mm::PhysAddr::from(ppn.0 * crate::config::PAGE_SIZE + offset);
+                Some(unsafe { (pa.0 as *const T).as_ref().unwrap() })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +281,42 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Translate a user pointer to a mutable reference
+pub fn translate_user_ptr<T>(ptr: *mut T) -> Option<&'static mut T> {
+    TASK_MANAGER.translate_user_ptr(ptr)
+}
+
+/// Translate a user pointer to a reference
+pub fn translate_user_ptr_readonly<T>(ptr: *const T) -> Option<&'static T> {
+    TASK_MANAGER.translate_user_ptr_readonly(ptr)
+}
+
+/// Increment syscall count for current task
+pub fn increment_current_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.increment_current_syscall_count(syscall_id);
+}
+
+/// Get syscall count for current task
+pub fn get_current_syscall_count(syscall_id: usize) -> usize {
+    TASK_MANAGER.get_current_syscall_count(syscall_id)
+}
+
+/// Perform mmap operation on current task
+pub fn current_mmap(start: usize, len: usize, prot: usize) -> isize {
+    TASK_MANAGER.current_mmap(start, len, prot)
+}
+
+/// Perform munmap operation on current task  
+pub fn current_munmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.current_munmap(start, len)
+}
+
+/// Execute function with current task's memory set
+pub fn with_current_memory_set<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut crate::mm::MemorySet) -> R,
+{
+    TASK_MANAGER.with_current_memory_set(f)
 }

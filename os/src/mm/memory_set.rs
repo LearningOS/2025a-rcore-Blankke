@@ -262,6 +262,150 @@ impl MemorySet {
             false
         }
     }
+
+    /// Check if any part of the range [start_va, end_va) is already mapped
+    pub fn check_range_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        for area in &self.areas {
+            // Check if there's any overlap between [start_vpn, end_vpn) and area's range
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            
+            // Two ranges [a1, a2) and [b1, b2) overlap if max(a1, b1) < min(a2, b2)
+            if area_start < end_vpn && start_vpn < area_end {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if the entire range [start_va, end_va) is fully mapped
+    pub fn check_range_fully_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        // Find all areas that intersect with the range
+        let mut covered_ranges = Vec::new();
+        for area in &self.areas {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            
+            // Check if area intersects with [start_vpn, end_vpn)
+            if area_start < end_vpn && start_vpn < area_end {
+                let intersect_start = area_start.max(start_vpn);
+                let intersect_end = area_end.min(end_vpn);
+                covered_ranges.push((intersect_start, intersect_end));
+            }
+        }
+        
+        // Sort ranges by start address
+        covered_ranges.sort_by_key(|&(start, _)| start);
+        
+        // Check if the ranges cover the entire [start_vpn, end_vpn)
+        let mut current_vpn = start_vpn;
+        for (range_start, range_end) in covered_ranges {
+            if range_start > current_vpn {
+                return false; // Gap found
+            }
+            current_vpn = current_vpn.max(range_end);
+            if current_vpn >= end_vpn {
+                return true; // Fully covered
+            }
+        }
+        
+        current_vpn >= end_vpn
+    }
+
+    /// Try to insert a framed area, return false if there's any conflict
+    pub fn try_insert_framed_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        // First check if the range is already mapped
+        if self.check_range_mapped(start_va, end_va) {
+            return false;
+        }
+        
+        // Try to allocate the area
+        self.insert_framed_area(start_va, end_va, permission);
+        true
+    }
+
+    /// Remove areas in the range [start_va, end_va)
+    pub fn remove_area_range(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        // Find areas that intersect with the range and remove them
+        let mut areas_to_remove = Vec::new();
+        let mut areas_to_modify = Vec::new();
+        
+        for (i, area) in self.areas.iter().enumerate() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            
+            if area_start < end_vpn && start_vpn < area_end {
+                // This area intersects with the range to remove
+                if area_start >= start_vpn && area_end <= end_vpn {
+                    // Entire area is within the range to remove
+                    areas_to_remove.push(i);
+                } else if area_start < start_vpn && area_end > end_vpn {
+                    // Area spans beyond both ends - need to split (not implemented for simplicity)
+                    // For now, we return false as this is a complex case
+                    return false;
+                } else {
+                    // Partial overlap - need to shrink the area
+                    areas_to_modify.push((i, area_start, area_end));
+                }
+            }
+        }
+        
+        // Remove areas that are completely within the range
+        for &i in areas_to_remove.iter().rev() {
+            let mut area = self.areas.remove(i);
+            area.unmap(&mut self.page_table);
+        }
+        
+        // For simplicity, we don't handle partial overlaps for now
+        // In a complete implementation, you would need to handle area splitting
+        if !areas_to_modify.is_empty() {
+            return false;
+        }
+        
+        true
+    }
+    
+    /// Check if any page in the range [start_va, end_va) is already mapped
+    pub fn is_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for area in &self.areas {
+            if area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn {
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Remove mapping area that exactly matches [start_va, end_va)
+    pub fn remove_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        for i in 0..self.areas.len() {
+            if self.areas[i].vpn_range.get_start() == start_vpn && 
+               self.areas[i].vpn_range.get_end() == end_vpn {
+                let mut area = self.areas.remove(i);
+                area.unmap(&mut self.page_table);
+                return true;
+            }
+        }
+        false
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

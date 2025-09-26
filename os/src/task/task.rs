@@ -5,6 +5,7 @@ use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
 use crate::trap::{trap_handler, TrapContext};
+use alloc::vec::Vec;
 
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
@@ -28,6 +29,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+    
+    /// Syscall count statistics (syscall_id, count)
+    pub syscall_counts: Vec<(usize, usize)>,
 }
 
 impl TaskControlBlock {
@@ -63,6 +67,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_counts: Vec::new(),
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
@@ -94,6 +99,110 @@ impl TaskControlBlock {
             Some(old_break)
         } else {
             None
+        }
+    }
+    
+    /// Increment syscall count for the given syscall ID
+    pub fn increment_syscall_count(&mut self, syscall_id: usize) {
+        // Find existing entry or create new one
+        for (id, count) in &mut self.syscall_counts {
+            if *id == syscall_id {
+                *count += 1;
+                return;
+            }
+        }
+        // Not found, add new entry
+        self.syscall_counts.push((syscall_id, 1));
+    }
+    
+    /// Get syscall count for the given syscall ID
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        for (id, count) in &self.syscall_counts {
+            if *id == syscall_id {
+                return *count;
+            }
+        }
+        0
+    }
+
+    /// Implement mmap system call
+    pub fn mmap(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        use crate::config::PAGE_SIZE;
+        use crate::mm::{VirtAddr, MapPermission};
+        
+        // Check parameter validity
+        // 1. start must be page-aligned
+        if start % PAGE_SIZE != 0 {
+            return -1;
+        }
+        
+        // 2. prot validation: only lower 3 bits should be set, and at least one permission bit should be set
+        if (prot & !0x7) != 0 || (prot & 0x7) == 0 {
+            return -1;
+        }
+        
+        // 3. Handle len = 0 case
+        if len == 0 {
+            return 0;
+        }
+        
+        // Convert prot to MapPermission
+        let mut map_perm = MapPermission::U; // User accessible
+        if (prot & 0x1) != 0 {
+            map_perm |= MapPermission::R;
+        }
+        if (prot & 0x2) != 0 {
+            map_perm |= MapPermission::W;
+        }
+        if (prot & 0x4) != 0 {
+            map_perm |= MapPermission::X;
+        }
+        
+        // Round up len to page boundary
+        let end = start + ((len + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        
+        // Check if the virtual address range is already mapped
+        if self.memory_set.check_range_mapped(VirtAddr::from(start), VirtAddr::from(end)) {
+            return -1;
+        }
+        
+        // Try to map the area
+        if self.memory_set.try_insert_framed_area(VirtAddr::from(start), VirtAddr::from(end), map_perm) {
+            0
+        } else {
+            -1 // Physical memory insufficient or other errors
+        }
+    }
+
+    /// Implement munmap system call
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        use crate::config::PAGE_SIZE;
+        use crate::mm::VirtAddr;
+        
+        // Check parameter validity
+        // 1. start must be page-aligned
+        if start % PAGE_SIZE != 0 {
+            return -1;
+        }
+        
+        // 2. Handle len = 0 case
+        if len == 0 {
+            return 0;
+        }
+        
+        // Round up len to page boundary
+        let end = start + ((len + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        
+        // Check if the entire range is mapped
+        if !self.memory_set.check_range_fully_mapped(VirtAddr::from(start), VirtAddr::from(end)) {
+            return -1;
+        }
+        
+        // Unmap the area
+        if self.memory_set.remove_area_range(VirtAddr::from(start), VirtAddr::from(end)) {
+            0
+        } else {
+            -1
         }
     }
 }
