@@ -27,35 +27,38 @@ pub fn sys_yield() -> isize {
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    
+
     // Check if ts is null
     if ts.is_null() {
         return -1;
     }
-    
+
     // Use translated_byte_buffer to handle the case where TimeVal might be split across pages
     use crate::mm::translated_byte_buffer;
     use crate::task::current_user_token;
     use crate::timer::get_time_us;
-    
+
     let token = current_user_token();
     let buffers = translated_byte_buffer(token, ts as *const u8, core::mem::size_of::<TimeVal>());
-    
+
     if buffers.is_empty() {
         return -1;
     }
-    
+
     let us = get_time_us();
     let time_val = TimeVal {
         sec: us / 1_000_000,
         usec: us % 1_000_000,
     };
-    
+
     // Copy the TimeVal data to user space using the translated buffers
     let time_val_bytes = unsafe {
-        core::slice::from_raw_parts(&time_val as *const TimeVal as *const u8, core::mem::size_of::<TimeVal>())
+        core::slice::from_raw_parts(
+            &time_val as *const TimeVal as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
     };
-    
+
     let mut offset = 0;
     for buffer in buffers {
         let copy_len = buffer.len().min(time_val_bytes.len() - offset);
@@ -65,7 +68,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
             break;
         }
     }
-    
+
     0
 }
 
@@ -73,13 +76,16 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    
+
     use crate::task::{translate_user_ptr, translate_user_ptr_readonly};
-    
+
     match trace_request {
         0 => {
             // Read operation
             let ptr = id as *const u8;
+            if ptr == isize::MAX as *const u8 {
+                return -1;
+            }
             if let Some(byte_ref) = translate_user_ptr_readonly(ptr) {
                 *byte_ref as isize
             } else {
@@ -87,8 +93,11 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
             }
         }
         1 => {
-            // Write operation  
+            // Write operation
             let ptr = id as *mut u8;
+            if ptr == isize::MAX as *mut u8 {
+                return -1;
+            }
             if let Some(byte_ref) = translate_user_ptr(ptr) {
                 *byte_ref = data as u8;
                 0
@@ -107,7 +116,12 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
 
 // YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
-    trace!("kernel: sys_mmap start={:#x}, len={}, prot={}", start, len, prot);
+    trace!(
+        "kernel: sys_mmap start={:#x}, len={}, prot={}",
+        start,
+        len,
+        prot
+    );
     use crate::task::current_mmap;
     current_mmap(start, len, prot)
 }
