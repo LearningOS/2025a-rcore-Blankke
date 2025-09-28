@@ -116,6 +116,21 @@ lazy_static! {
     });
 }
 
+/// Map memory for current task using mmap
+pub fn current_mmap(start: usize, len: usize, prot: usize) -> isize {
+    current_task().unwrap().mmap(start, len, prot)
+}
+
+/// Unmap memory for current task using munmap
+pub fn current_munmap(start: usize, len: usize) -> isize {
+    current_task().unwrap().munmap(start, len)
+}
+
+/// Change the program break for current task
+pub fn change_program_brk(size: i32) -> Option<usize> {
+    current_task().unwrap().change_program_brk(size)
+}
+
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());

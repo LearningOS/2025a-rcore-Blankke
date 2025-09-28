@@ -88,6 +88,119 @@ impl MemorySet {
         }
         self.areas.push(map_area);
     }
+    
+    /// Check if a virtual address range overlaps with existing mapped areas
+    pub fn check_overlap(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        for area in self.areas.iter() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            
+            // Check if ranges overlap
+            if start_vpn < area_end && end_vpn > area_start {
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Map a memory region using mmap
+    pub fn mmap(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        use crate::config::PAGE_SIZE;
+        
+        // Check alignment
+        if start & (PAGE_SIZE - 1) != 0 {
+            return -1; // start not page aligned
+        }
+        
+        // Check prot validity
+        if prot & !0x7 != 0 || prot & 0x7 == 0 {
+            return -1; // invalid prot
+        }
+        
+        if len == 0 {
+            return 0; // success for zero length
+        }
+        
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+        
+        // Check for overlaps
+        if self.check_overlap(start_va, end_va) {
+            return -1; // overlap detected
+        }
+        
+        // Convert prot to MapPermission
+        let mut permission = MapPermission::U;
+        if prot & 1 != 0 { // readable
+            permission |= MapPermission::R;
+        }
+        if prot & 2 != 0 { // writable
+            permission |= MapPermission::W;
+        }
+        if prot & 4 != 0 { // executable
+            permission |= MapPermission::X;
+        }
+        
+        // Create and insert the new area
+        self.insert_framed_area(start_va, end_va, permission);
+        0
+    }
+    
+    /// Unmap a memory region using munmap
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        use crate::config::PAGE_SIZE;
+        
+        // Check alignment
+        if start & (PAGE_SIZE - 1) != 0 {
+            return -1; // start not page aligned
+        }
+        
+        if len == 0 {
+            return 0; // success for zero length
+        }
+        
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        // Check if all pages in the range are mapped
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            let mut found = false;
+            for area in self.areas.iter() {
+                if area.vpn_range.get_start() <= vpn && vpn < area.vpn_range.get_end() {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return -1; // unmapped page found
+            }
+        }
+        
+        // Remove areas that are completely contained in the unmap range
+        let mut areas_to_remove = Vec::new();
+        for (idx, area) in self.areas.iter().enumerate() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            
+            // If area is completely within unmap range, mark for removal
+            if area_start >= start_vpn && area_end <= end_vpn {
+                areas_to_remove.push(idx);
+            }
+        }
+        
+        // Remove areas in reverse order to maintain indices
+        for &idx in areas_to_remove.iter().rev() {
+            let mut area = self.areas.remove(idx);
+            area.unmap(&mut self.page_table);
+        }
+        
+        0
+    }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
         self.page_table.map(
