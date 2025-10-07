@@ -12,6 +12,10 @@ pub trait Mutex: Sync + Send {
     fn lock(&self);
     /// Unlock the mutex
     fn unlock(&self);
+    /// Get the number of waiting threads
+    fn waiting_count(&self) -> usize;
+    /// Check if the mutex is locked
+    fn is_locked(&self) -> bool;
 }
 
 /// Spinlock Mutex struct
@@ -49,6 +53,14 @@ impl Mutex for MutexSpin {
         trace!("kernel: MutexSpin::unlock");
         let mut locked = self.locked.exclusive_access();
         *locked = false;
+    }
+
+    fn waiting_count(&self) -> usize {
+        0 // Spin lock doesn't have a wait queue
+    }
+
+    fn is_locked(&self) -> bool {
+        *self.locked.exclusive_access()
     }
 }
 
@@ -101,5 +113,15 @@ impl Mutex for MutexBlocking {
         } else {
             mutex_inner.locked = false;
         }
+    }
+
+    fn waiting_count(&self) -> usize {
+        let mutex_inner = self.inner.exclusive_access();
+        mutex_inner.wait_queue.len()
+    }
+
+    fn is_locked(&self) -> bool {
+        let mutex_inner = self.inner.exclusive_access();
+        mutex_inner.locked
     }
 }

@@ -49,6 +49,8 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// deadlock detection enabled
+    pub deadlock_detect_enabled: bool,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +83,230 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+
+    /// Check if acquiring a mutex would cause deadlock using banker's algorithm
+    pub fn check_mutex_deadlock(&self, mutex_id: usize) -> bool {
+        if !self.deadlock_detect_enabled {
+            return false;
+        }
+
+        let mutex_count = self.mutex_list.len();
+        if mutex_count == 0 {
+            return false;
+        }
+
+        // Count active threads
+        let mut thread_count = 0;
+        for task_opt in &self.tasks {
+            if task_opt.is_some() {
+                thread_count += 1;
+            }
+        }
+
+        if thread_count == 0 {
+            return false;
+        }
+
+        // Build Available vector: 1 if mutex is not locked, 0 if locked
+        let mut available = vec![0; mutex_count];
+        for (mid, mutex_opt) in self.mutex_list.iter().enumerate() {
+            if let Some(mutex) = mutex_opt {
+                if !mutex.is_locked() {
+                    available[mid] = 1;
+                }
+            } else {
+                available[mid] = 1;
+            }
+        }
+
+        // Build Allocation matrix: which thread holds which mutex
+        // Build Need matrix: which thread needs which mutex
+        let allocation = vec![vec![0; mutex_count]; thread_count];
+        let mut need = vec![vec![0; mutex_count]; thread_count];
+
+        // For simplicity, assume if a mutex is locked, it's held by some thread
+        // and if threads are waiting, they need it
+        for (mid, mutex_opt) in self.mutex_list.iter().enumerate() {
+            if let Some(mutex) = mutex_opt {
+                if mutex.is_locked() {
+                    // Mark as allocated (simplified - we don't track exact ownership)
+                    // Just mark that it's taken
+                    available[mid] = 0;
+                }
+                
+                // Threads waiting on this mutex need it
+                let waiting = mutex.waiting_count();
+                if waiting > 0 {
+                    // Mark first 'waiting' threads as needing this mutex
+                    for i in 0..waiting.min(thread_count) {
+                        need[i][mid] = 1;
+                    }
+                }
+            }
+        }
+
+        // Current thread will need mutex_id
+        // Simulate the current thread requesting mutex_id
+        if mutex_id < mutex_count {
+            if let Some(mutex) = &self.mutex_list[mutex_id] {
+                if mutex.is_locked() {
+                    // If locked, current thread would need it
+                    // Add to first available thread slot in need matrix
+                    for i in 0..thread_count {
+                        if need[i][mutex_id] == 0 {
+                            need[i][mutex_id] = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Banker's algorithm
+        let mut work = available.clone();
+        let mut finish = vec![false; thread_count];
+
+        loop {
+            let mut found = false;
+            
+            for i in 0..thread_count {
+                if finish[i] {
+                    continue;
+                }
+
+                // Check if Need[i] <= Work
+                let mut can_finish = true;
+                for j in 0..mutex_count {
+                    if need[i][j] > work[j] {
+                        can_finish = false;
+                        break;
+                    }
+                }
+
+                if can_finish {
+                    // Thread i can finish
+                    finish[i] = true;
+                    // Release resources
+                    for j in 0..mutex_count {
+                        work[j] += allocation[i][j];
+                    }
+                    found = true;
+                }
+            }
+
+            if !found {
+                break;
+            }
+        }
+
+        // If not all threads can finish, there's a potential deadlock
+        !finish.iter().all(|&f| f)
+    }
+
+    /// Check if semaphore down would cause deadlock using banker's algorithm
+    pub fn check_semaphore_deadlock(&self, sem_id: usize) -> bool {
+        if !self.deadlock_detect_enabled {
+            return false;
+        }
+
+        let sem_count = self.semaphore_list.len();
+        if sem_count == 0 || sem_id >= sem_count {
+            return false;
+        }
+
+        // Count active threads
+        let mut thread_count = 0;
+        for task_opt in &self.tasks {
+            if task_opt.is_some() {
+                thread_count += 1;
+            }
+        }
+
+        if thread_count == 0 {
+            return false;
+        }
+
+        // Build Available vector based on semaphore counts
+        let mut available = vec![0; sem_count];
+        for (sid, sem_opt) in self.semaphore_list.iter().enumerate() {
+            if let Some(sem) = sem_opt {
+                let sem_inner = sem.inner.exclusive_access();
+                available[sid] = sem_inner.count.max(0) as usize;
+            }
+        }
+
+        // Build Allocation and Need matrices
+        let allocation = vec![vec![0; sem_count]; thread_count];
+        let mut need = vec![vec![0; sem_count]; thread_count];
+
+        // Check waiting queues
+        for (sid, sem_opt) in self.semaphore_list.iter().enumerate() {
+            if let Some(sem) = sem_opt {
+                let sem_inner = sem.inner.exclusive_access();
+                let waiting = sem_inner.wait_queue.len();
+                
+                // Threads waiting on this semaphore need it
+                for i in 0..waiting.min(thread_count) {
+                    need[i][sid] = 1;
+                }
+            }
+        }
+
+        // Simulate current thread requesting sem_id
+        if let Some(sem) = &self.semaphore_list[sem_id] {
+            let sem_inner = sem.inner.exclusive_access();
+            if sem_inner.count <= 0 {
+                // Current thread would need to wait
+                // Add to first available thread slot
+                for i in 0..thread_count {
+                    if need[i][sem_id] == 0 {
+                        need[i][sem_id] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Banker's algorithm
+        let mut work = available.clone();
+        let mut finish = vec![false; thread_count];
+
+        loop {
+            let mut found = false;
+            
+            for i in 0..thread_count {
+                if finish[i] {
+                    continue;
+                }
+
+                // Check if Need[i] <= Work
+                let mut can_finish = true;
+                for j in 0..sem_count {
+                    if need[i][j] > work[j] {
+                        can_finish = false;
+                        break;
+                    }
+                }
+
+                if can_finish {
+                    // Thread i can finish
+                    finish[i] = true;
+                    // Release resources
+                    for j in 0..sem_count {
+                        work[j] += allocation[i][j];
+                    }
+                    found = true;
+                }
+            }
+
+            if !found {
+                break;
+            }
+        }
+
+        // If not all threads can finish, there's a potential deadlock
+        !finish.iter().all(|&f| f)
     }
 }
 
@@ -119,6 +345,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
                 })
             },
         });
@@ -245,6 +472,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
                 })
             },
         });
